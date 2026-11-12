@@ -55,6 +55,16 @@ local function effects_for(technology, recipe_name)
 	return matches
 end
 
+local function count_generated_variants()
+	local count = 0
+	for _, recipe in pairs(data.raw["recipe"]) do
+		if recipe.PlanetsLib_ground_digger_stack_variant then
+			count = count + 1
+		end
+	end
+	return count
+end
+
 local function assert_recipe_productivity(technology, recipe_name, change)
 	local effects = effects_for(technology, recipe_name)
 	assert(
@@ -236,6 +246,18 @@ record("GD-4b", function()
 		default_config.diggers["electric-mining-drill"],
 		"the default drill selection did not include the electric mining drill"
 	)
+	assert(
+		default_config.diggers["electric-mining-drill"].full_belt_stacks == false,
+		"the electric mining drill should not batch ground-digger recipes"
+	)
+	if data.raw["mining-drill"]["big-mining-drill"] then
+		local big = default_config.diggers["big-mining-drill"]
+		assert(big, "the default drill selection did not include the big mining drill")
+		assert(
+			big.full_belt_stacks == true,
+			"the big mining drill should batch ground-digger recipes"
+		)
+	end
 end)
 
 -- GD-4c: a configuration for a planet that does not exist must fail loudly.
@@ -358,6 +380,11 @@ record("GD-5", function()
 		"funit-gd-recipe-a",
 		"funit-gd-recipe-b",
 		"funit-gd-recipe-default",
+		"funit-gd-recipe-fluid",
+		"funit-gd-recipe-double",
+		"funit-gd-recipe-unstackable",
+		"funit-gd-recipe-probability",
+		"funit-gd-recipe-ingredients",
 		"funit-gd-late-recipe",
 	}
 
@@ -367,9 +394,46 @@ record("GD-5", function()
 		assert_recipe_productivity(test_tech, recipe_name, 0.2)
 	end
 
-	-- A second generation pass must not duplicate the effects.
+	-- Every generated stack variant also receives the mining-productivity effect.
+	local variants = {
+		"funit-gd-recipe-a-PlanetsLib-stack-2",
+		"funit-gd-recipe-a-PlanetsLib-stack-3",
+		"funit-gd-recipe-a-PlanetsLib-stack-4",
+		"funit-gd-recipe-fluid-PlanetsLib-stack-4",
+		"funit-gd-recipe-double-PlanetsLib-stack-4",
+		"funit-gd-recipe-unstackable-PlanetsLib-stack-4",
+		"funit-gd-recipe-probability-PlanetsLib-stack-4",
+		"funit-gd-recipe-ingredients-PlanetsLib-stack-4",
+		"funit-gd-late-recipe-PlanetsLib-stack-4",
+	}
+	for _, recipe_name in ipairs(variants) do
+		local variant_recipe = data.raw["recipe"][recipe_name]
+		assert(variant_recipe, "the generated variant '" .. recipe_name .. "' is missing")
+		assert(variant_recipe.hidden == true, "the generated variant '" .. recipe_name .. "' is not hidden")
+		assert(variant_recipe.enabled == true, "the generated variant '" .. recipe_name .. "' is not enabled")
+		assert(
+			variant_recipe.auto_recycle == false,
+			"the generated variant '" .. recipe_name .. "' should not be recyclable"
+		)
+		assert(
+			type(variant_recipe.main_product) == "string",
+			"the generated variant '" .. recipe_name .. "' lost main_product"
+		)
+		assert_recipe_productivity(test_tech, recipe_name, 0.2)
+	end
+
+	-- A second generation pass must not duplicate the effects or the variants.
+	local variant_count = count_generated_variants()
+	assert(variant_count > 0, "no stack variants were generated")
 	ground_diggers.generate_ground_diggers()
+	assert(
+		count_generated_variants() == variant_count,
+		"a second generation pass duplicated or removed stack variants"
+	)
 	for _, recipe_name in ipairs(recipes) do
+		assert_recipe_productivity(test_tech, recipe_name, 0.2)
+	end
+	for _, recipe_name in ipairs(variants) do
 		assert_recipe_productivity(test_tech, recipe_name, 0.2)
 	end
 
@@ -379,6 +443,83 @@ record("GD-5", function()
 		for _, recipe_name in ipairs(recipes) do
 			assert_recipe_productivity(vanilla, recipe_name, 0.1)
 		end
+		for _, recipe_name in ipairs(variants) do
+			assert_recipe_productivity(vanilla, recipe_name, 0.1)
+		end
+	end
+end)
+
+-- GD-3c: when every planet participates, the hidden participating-planet condition
+-- would allow every surface, so the generated diggers must not list any surface
+-- conditions. Restrictive inherited conditions must still survive.
+record("GD-3c", function()
+	local configs = get_configs()
+	local temporary_planets = {}
+	local saved_configs = {}
+	local saved_markers = {}
+
+	local function snapshot_marker(planet_name)
+		if saved_markers[planet_name] == nil then
+			local planet = data.raw["planet"][planet_name]
+			saved_markers[planet_name] = {
+				planet = planet,
+				value = planet.surface_properties and planet.surface_properties[MARKER] or nil,
+			}
+		end
+	end
+
+	local function restore()
+		for _, planet_name in ipairs(temporary_planets) do
+			configs[planet_name] = saved_configs[planet_name]
+		end
+		for _, saved in pairs(saved_markers) do
+			local planet = saved.planet
+			if planet then
+				planet.surface_properties = planet.surface_properties or {}
+				planet.surface_properties[MARKER] = saved.value
+			end
+		end
+		ground_diggers.generate_ground_diggers()
+	end
+
+	local ok, err = pcall(function()
+		for planet_name in pairs(data.raw["planet"]) do
+			snapshot_marker(planet_name)
+			if not configs[planet_name] then
+				temporary_planets[#temporary_planets + 1] = planet_name
+				saved_configs[planet_name] = nil
+				configs[planet_name] = {
+					recipe = "funit-gd-recipe-a",
+					drills = { ["electric-mining-drill"] = true },
+				}
+			end
+		end
+
+		ground_diggers.generate_ground_diggers()
+
+		local digger = data.raw["assembling-machine"]["electric-mining-drill-ground-digger"]
+		assert(digger, "the shared electric mining drill digger is missing")
+		assert(
+			digger.surface_conditions == nil,
+			"all-surface diggers should have no surface conditions"
+		)
+
+		local conditioned = data.raw["assembling-machine"]["funit-gd-conditioned-drill-ground-digger"]
+		assert(conditioned, "the conditioned drill's shared digger is missing")
+		local count = 0
+		for _, condition in ipairs(conditioned.surface_conditions or {}) do
+			count = count + 1
+			assert(
+				condition.property ~= MARKER,
+				"the participating-planet condition should be deleted when every planet participates"
+			)
+		end
+		assert(count == 1, "the conditioned digger should keep exactly one inherited condition")
+	end)
+
+	restore()
+	if not ok then
+		error(err, 0)
 	end
 end)
 

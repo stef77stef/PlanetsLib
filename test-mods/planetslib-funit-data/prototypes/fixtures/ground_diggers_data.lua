@@ -56,6 +56,72 @@ local setup_ok, setup_err = pcall(function()
 	add_recipe("funit-gd-recipe-default", nil, "iron-ore")
 	add_recipe("funit-gd-late-recipe", { "funit-gd-late-category" }, "coal")
 
+	-- An item that cannot stack on belts. Variants are still generated up to the
+	-- utility-constants limit, but the runtime stack size is capped at 1.
+	local unstackable = table.deepcopy(data.raw.item["stone"])
+	unstackable.name = "funit-gd-unstackable"
+	unstackable.stack_size = 1
+	data:extend({ unstackable })
+
+	data:extend({
+		{
+			type = "recipe",
+			name = "funit-gd-recipe-fluid",
+			categories = { "funit-gd-category-a" },
+			energy_required = 1,
+			ingredients = {},
+			results = {
+				{ type = "item", name = "stone", amount = 1 },
+				{ type = "fluid", name = "water", amount = 10 },
+			},
+			enabled = true,
+			main_product = "stone",
+		},
+		{
+			type = "recipe",
+			name = "funit-gd-recipe-double",
+			categories = { "funit-gd-category-b" },
+			energy_required = 1,
+			ingredients = {},
+			results = { { type = "item", name = "stone", amount = 2 } },
+			enabled = true,
+			main_product = "stone",
+		},
+		{
+			type = "recipe",
+			name = "funit-gd-recipe-unstackable",
+			categories = { "funit-gd-category-a" },
+			energy_required = 1,
+			ingredients = {},
+			results = { { type = "item", name = "funit-gd-unstackable", amount = 1 } },
+			enabled = true,
+			main_product = "funit-gd-unstackable",
+		},
+		{
+			type = "recipe",
+			name = "funit-gd-recipe-probability",
+			categories = { "funit-gd-category-b" },
+			energy_required = 1,
+			ingredients = {},
+			results = {
+				{ type = "item", name = "stone", amount = 1, extra_count_fraction = 0.5 },
+				{ type = "item", name = "copper-ore", amount = 1, independent_probability = 0.25 },
+			},
+			enabled = true,
+			main_product = "stone",
+		},
+		{
+			type = "recipe",
+			name = "funit-gd-recipe-ingredients",
+			categories = { "funit-gd-category-a" },
+			energy_required = 1,
+			ingredients = { { type = "item", name = "iron-plate", amount = 2 } },
+			results = { { type = "item", name = "stone", amount = 1 } },
+			enabled = true,
+			main_product = "stone",
+		},
+	})
+
 	local function add_planet(name)
 		local planet = table.deepcopy(data.raw.planet.nauvis)
 		planet.name = name
@@ -67,6 +133,11 @@ local setup_ok, setup_err = pcall(function()
 	add_planet("funit-gd-planet")
 	add_planet("funit-gd-planet-b")
 	add_planet("funit-gd-planet-c")
+	add_planet("funit-gd-planet-fluid")
+	add_planet("funit-gd-planet-double")
+	add_planet("funit-gd-planet-unstackable")
+	add_planet("funit-gd-planet-probability")
+	add_planet("funit-gd-planet-ingredients")
 	add_planet("funit-gd-idle")
 	add_planet("funit-gd-late")
 
@@ -129,6 +200,11 @@ local setup_ok, setup_err = pcall(function()
 	})
 	PlanetsLib.enable_ground_diggers("funit-gd-planet-b", "funit-gd-recipe-b")
 	PlanetsLib.enable_ground_diggers("funit-gd-planet-c", "funit-gd-recipe-default")
+	PlanetsLib.enable_ground_diggers("funit-gd-planet-fluid", "funit-gd-recipe-fluid")
+	PlanetsLib.enable_ground_diggers("funit-gd-planet-double", "funit-gd-recipe-double")
+	PlanetsLib.enable_ground_diggers("funit-gd-planet-unstackable", "funit-gd-recipe-unstackable")
+	PlanetsLib.enable_ground_diggers("funit-gd-planet-probability", "funit-gd-recipe-probability")
+	PlanetsLib.enable_ground_diggers("funit-gd-planet-ingredients", "funit-gd-recipe-ingredients")
 end)
 results.record(SUITE, "GD-0-setup", setup_ok, setup_err)
 if not setup_ok then
@@ -376,6 +452,68 @@ record("GD-3", function()
 	assert(base.energy_source.drain == nil, "the source drill's drain was mutated")
 	assert(#base.flags == 1, "the source drill's flags were mutated")
 	assert(base.mining_speed == 2.5, "the source drill's mining_speed was mutated")
+
+	-- Surface conditions that allow every surface do not restrict the digger and are
+	-- deleted instead of being inherited. Only the participating-planet condition
+	-- should remain.
+	local unrestricted = table.deepcopy(base)
+	unrestricted.name = "funit-gd-unrestricted-drill"
+	unrestricted.surface_conditions = {
+		{ property = "pressure" },
+		{ property = "temperature", min = -math.huge, max = math.huge },
+	}
+	local unrestricted_digger = ground_diggers.create_ground_digger(
+		unrestricted,
+		"funit-gd-unrestricted-digger",
+		"electric-mining-drill",
+		categories
+	)
+	assert(
+		#unrestricted_digger.surface_conditions == 1,
+		"all-surface conditions should be deleted from the digger, got "
+			.. #unrestricted_digger.surface_conditions
+	)
+	assert(
+		unrestricted_digger.surface_conditions[1].property == MARKER,
+		"the digger should only keep the participating-planet surface condition"
+	)
+
+	-- An empty condition list also allows every surface.
+	local empty_conditions = table.deepcopy(base)
+	empty_conditions.name = "funit-gd-empty-conditions-drill"
+	empty_conditions.surface_conditions = {}
+	local empty_conditions_digger = ground_diggers.create_ground_digger(
+		empty_conditions,
+		"funit-gd-empty-conditions-digger",
+		"electric-mining-drill",
+		categories
+	)
+	assert(
+		#empty_conditions_digger.surface_conditions == 1
+			and empty_conditions_digger.surface_conditions[1].property == MARKER,
+		"an empty condition list should still produce only the participating-planet condition"
+	)
+
+	-- A condition with a real bound still restricts the digger and must be kept.
+	local bounded = table.deepcopy(base)
+	bounded.name = "funit-gd-bounded-drill"
+	bounded.surface_conditions = { { property = "pressure", min = 0 } }
+	local bounded_digger = ground_diggers.create_ground_digger(
+		bounded,
+		"funit-gd-bounded-digger",
+		"electric-mining-drill",
+		categories
+	)
+	assert(#bounded_digger.surface_conditions == 2, "a bounded surface condition was deleted")
+	assert(
+		bounded_digger.surface_conditions[1].property == "pressure"
+			and bounded_digger.surface_conditions[1].min == 0,
+		"the bounded surface condition was changed"
+	)
+	assert(
+		bounded_digger.surface_conditions[2].property == MARKER,
+		"the bounded digger is missing the participating-planet condition"
+	)
 
 	-- The categories argument is deep-copied, not aliased.
 	digger.crafting_categories[1] = "mutated"
